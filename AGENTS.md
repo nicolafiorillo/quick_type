@@ -10,7 +10,7 @@ L'intera applicazione vive in [src/main.rs](src/main.rs) (~200 righe, single-fil
 - `cargo build` / `cargo run` — build di debug
 - `cargo build --release` — build ottimizzata (profilo `[profile.release]` in [Cargo.toml](Cargo.toml): `lto`, `codegen-units = 1`, `strip`, `panic = "abort"`; non rimuoverlo, è pensato per un binario menu-bar piccolo)
 - `make build` / `make test` / `make install` — wrapper dei comandi cargo (`install` copia il binario in `~/.cargo/bin`)
-- `make autostart` — installa il binario e registra un LaunchAgent (`~/Library/LaunchAgents/com.quicktype.app.plist`) per l'avvio automatico al login; `make autostart-remove` per disattivarlo. Log su `/tmp/quick_type.{log,err}`. **Niente `KeepAlive`**: se l'app crasha o viene chiusa dal menu resta chiusa fino al prossimo login (decisione voluta, non riaggiungerlo).
+- Avvio automatico al login: voce di menu **"Launch at login"** che (de)registra il LaunchAgent `~/Library/LaunchAgents/com.quicktype.app.plist` a runtime (label `com.quicktype.app`, SSOT: `LAUNCH_AGENT_LABEL`). Log su `/tmp/quick_type.{log,err}`. **Niente `KeepAlive`**: se l'app crasha o viene chiusa dal menu resta chiusa fino al prossimo login (decisione voluta, non riaggiungerlo). Il plist punta a `current_exe()`: attivarlo dal binario installato, non da `target/debug`. **Niente `launchctl bootstrap` all'attivazione**: con `RunAtLoad` launchd lancerebbe subito una seconda istanza — il plist da solo basta per il prossimo login (bug già incontrato).
 - **Runtime**: l'app richiede i permessi di Accessibilità macOS (Impostazioni di Sistema → Privacy e Sicurezza → Accessibilità) per il terminale/l'app che la esegue; senza, `rdev::grab` fallisce. Il test a runtime va fatto dall'utente. Con l'autostart attivo, il permesso va concesso al binario `quick_type` stesso.
 
 ## Architettura
@@ -46,9 +46,11 @@ Queste alternative sono state analizzate e scartate; non riproporle:
 2. `thread::spawn` per trigger resta: i trigger sono rari e il thread vive ~15-30 ms; un thread pool sarebbe over-engineering.
 3. `statusItemWithLength(-1.0)` resta: è `NSVariableStatusItemLength`, già documentato dal commento inline.
 4. `let _ = simulate(...)` resta: non esiste un recovery sensato se la simulazione fallisce.
+5. `SMAppService` (API moderna macOS 13+) scartato: richiede un .app bundle, mentre quick_type è un binario raw. Si usa il LaunchAgent plist gestito a runtime dalla voce di menu. Non riproporlo finché il binario resta raw.
 
 ## Pitfall noti
 
 - `ns_string!` accetta **solo letterali**: per stringhe costruite a runtime serve `NSString::from_str(&format!(...))`, e `setTitle` vuole `&NSString` (non `&String` — errore E0308 già incontrato).
+- `NSMenuItem::setTarget` è `unsafe` e la proprietà target è **weak**: l'handler (`MenuHandler`) resta vivo perché `app.run()` non ritorna mai — non spostarlo in uno scope che termina.
 - L'ordine dei bracci nel `match` di `callback` conta: `KeyPress(Space)` deve precedere il braccio generico sulle vocali.
 - `rdev` è una dipendenza git: un `cargo update` può cambiarne il comportamento; verificare con `cargo check` dopo ogni update.

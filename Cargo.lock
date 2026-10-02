@@ -387,6 +387,7 @@ name = "quick_type"
 version = "0.2.0"
 dependencies = [
  "core-graphics",
+ "libc",
  "objc2",
  "objc2-app-kit",
  "objc2-foundation",

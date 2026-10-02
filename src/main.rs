@@ -1,12 +1,16 @@
 use core_graphics::event::{CGEvent, CGEventTapLocation};
 use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
-use objc2::sel;
-use objc2::MainThreadMarker;
+use objc2::rc::Retained;
+use objc2::runtime::NSObject;
+use objc2::{define_class, msg_send, sel, MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::{
-    NSApplication, NSApplicationActivationPolicy, NSMenu, NSMenuItem, NSStatusBar,
+    NSApplication, NSApplicationActivationPolicy, NSControlStateValueOff, NSControlStateValueOn,
+    NSMenu, NSMenuItem, NSStatusBar,
 };
 use objc2_foundation::{ns_string, NSString};
 use rdev::{grab, simulate, Event, EventType, Key};
+use std::path::PathBuf;
+use std::process::Command;
 use std::sync::Mutex;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -18,6 +22,62 @@ const HOLD_THRESHOLD: Duration = Duration::from_millis(100);
 
 /// Nome mostrato all'utente (tooltip, menu, stdout): unica fonte di verità.
 const APP_NAME: &str = "Quick Accent";
+
+/// Label del LaunchAgent per l'avvio automatico al login: unica fonte di verità.
+const LAUNCH_AGENT_LABEL: &str = "com.quicktype.app";
+
+/// Path del plist del LaunchAgent: ~/Library/LaunchAgents/<label>.plist.
+fn launch_agent_path() -> Option<PathBuf> {
+    std::env::var_os("HOME").map(|home| {
+        PathBuf::from(home)
+            .join("Library/LaunchAgents")
+            .join(format!("{LAUNCH_AGENT_LABEL}.plist"))
+    })
+}
+
+/// L'avvio automatico è attivo se il plist esiste.
+fn autostart_enabled() -> bool {
+    launch_agent_path().is_some_and(|p| p.exists())
+}
+
+/// Esegue launchctl <subcommand> gui/<uid> <plist> (bootstrap/bootout).
+fn run_launchctl(subcommand: &str, plist: &std::path::Path) {
+    let _ = Command::new("launchctl")
+        .args([subcommand, &format!("gui/{}", unsafe { libc::getuid() })])
+        .arg(plist)
+        .output();
+}
+
+/// (Dis)attiva l'avvio automatico: scrive/rimuove il plist del LaunchAgent.
+/// Niente KeepAlive: se l'app viene chiusa resta chiusa.
+/// IMPORTANTE: all'attivazione NON facciamo `launchctl bootstrap`: con
+/// RunAtLoad=true launchd avvierebbe subito una seconda istanza dell'app.
+/// Il plist basta da solo: launchd lo carica automaticamente al prossimo
+/// login. In disattivazione il bootout è innocuo se l'agent non è caricato.
+fn set_autostart(enabled: bool) {
+    let Some(plist) = launch_agent_path() else { return };
+    if enabled {
+        let Ok(exe) = std::env::current_exe() else { return };
+        let contents = format!(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+             <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \
+             \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n\
+             <plist version=\"1.0\">\n<dict>\n\
+             \t<key>Label</key>\n\t<string>{LAUNCH_AGENT_LABEL}</string>\n\
+             \t<key>ProgramArguments</key>\n\
+             \t<array>\n\t\t<string>{}</string>\n\t</array>\n\
+             \t<key>RunAtLoad</key>\n\t<true/>\n\
+             \t<key>StandardOutPath</key>\n\t<string>/tmp/quick_type.log</string>\n\
+             \t<key>StandardErrorPath</key>\n\t<string>/tmp/quick_type.err</string>\n\
+             </dict>\n</plist>\n",
+            exe.display()
+        );
+        let _ = std::fs::write(&plist, contents);
+    } else {
+        run_launchctl("bootout", &plist);
+        let _ = std::fs::remove_file(&plist);
+    }
+}
 
 /// Piccola pausa prima dell'invio dei Backspace, per lasciare che il sistema
 /// smaltisca gli eventi di tastiera ancora in coda.
@@ -118,10 +178,10 @@ fn callback(event: Event) -> Option<Event> {
         // Rilascio di una vocale: resettiamo lo stato.
         EventType::KeyRelease(key) if accent_for(key).is_some() => {
             let mut state = STATE.lock().unwrap();
-            if let Some((k, ..)) = &state.current {
-                if *k == key {
-                    state.current = None;
-                }
+            if let Some((k, ..)) = &state.current
+                && *k == key
+            {
+                state.current = None;
             }
             if state.suppressed == Some(key) {
                 state.suppressed = None;
@@ -141,6 +201,33 @@ fn start_keyboard_grab() {
             eprintln!("Make sure the terminal has Accessibility permission in System Settings.");
         }
     });
+}
+
+// Handler per le azioni del menu: main-thread-only, nessuno stato (lo stato
+// dell'autostart si legge dal filesystem a ogni toggle).
+define_class!(
+    #[unsafe(super(NSObject))]
+    #[thread_kind = MainThreadOnly]
+    struct MenuHandler;
+
+    impl MenuHandler {
+        #[unsafe(method(toggleAutostart:))]
+        fn toggle_autostart(&self, sender: &NSMenuItem) {
+            set_autostart(!autostart_enabled());
+            // La spunta riflette lo stato reale dopo l'operazione.
+            sender.setState(if autostart_enabled() {
+                NSControlStateValueOn
+            } else {
+                NSControlStateValueOff
+            });
+        }
+    }
+);
+
+impl MenuHandler {
+    fn new(mtm: MainThreadMarker) -> Retained<Self> {
+        unsafe { msg_send![mtm.alloc::<Self>(), init] }
+    }
 }
 
 /// Crea l'icona nella barra dei menu di macOS con un menu di contesto.
@@ -168,6 +255,27 @@ fn setup_status_item(mtm: MainThreadMarker) {
     info.setTitle(&info_title);
     info.setEnabled(false);
     menu.addItem(&info);
+
+    // Voce toggle per l'avvio automatico al login: target = handler dedicato,
+    // spunta iniziale riflette lo stato reale (esistenza del plist).
+    let handler = MenuHandler::new(mtm);
+    let autostart = unsafe {
+        NSMenuItem::initWithTitle_action_keyEquivalent(
+            mtm.alloc(),
+            ns_string!("Launch at login"),
+            Some(sel!(toggleAutostart:)),
+            ns_string!(""),
+        )
+    };
+    // setTarget è unsafe e il target è weak: handler resta vivo perché
+    // app.run() non ritorna mai (stesso invariante delle altre variabili locali).
+    unsafe {
+        autostart.setTarget(Some(&handler));
+    }
+    if autostart_enabled() {
+        autostart.setState(NSControlStateValueOn);
+    }
+    menu.addItem(&autostart);
 
     let quit = unsafe {
         NSMenuItem::initWithTitle_action_keyEquivalent(
