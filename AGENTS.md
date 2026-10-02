@@ -26,7 +26,7 @@ Il progetto segue rigorosamente **DRY**, **SSOT**, **no boilerplate**, **perform
 - `accent_for(key) -> Option<&'static str>` è l'**unica fonte di verità** per l'insieme delle vocali e la mappa vocale→accento. Aggiungere/togliere una vocale = una riga qui. Non reintrodurre funzioni separate tipo `is_vowel` né duplicare l'elenco nei `match`.
 - `APP_NAME` è l'unica fonte di verità per il nome mostrato all'utente (menu, stdout).
 - Costanti documentate per ogni numero magico (`HOLD_THRESHOLD`, `INJECT_DELAY`); niente literal sparsi.
-- Codice commentato in italiano; i commenti spiegano il *perché* (vincoli, invarianti), non il *cosa*.
+- **Stringhe utente in inglese britannico** (tooltip, menu, stdout/stderr); i commenti del codice restano in italiano e spiegano il *perché* (vincoli, invarianti), non il *cosa*.
 
 ## Approccio moderno
 

@@ -137,8 +137,8 @@ fn callback(event: Event) -> Option<Event> {
 fn start_keyboard_grab() {
     thread::spawn(|| {
         if let Err(error) = grab(callback) {
-            eprintln!("Errore critico durante l'intercettazione: {:?}", error);
-            eprintln!("Assicurati che il Terminale abbia i permessi di Accessibilità in Impostazioni di Sistema.");
+            eprintln!("Critical error while grabbing the keyboard: {error:?}");
+            eprintln!("Make sure the terminal has Accessibility permission in System Settings.");
         }
     });
 }
@@ -156,14 +156,14 @@ fn setup_status_item(mtm: MainThreadMarker) {
     if let Some(button) = item.button(mtm) {
         button.setTitle(ns_string!("à"));
         button.setToolTip(Some(ns_string!(
-            "Quick Accent attivo: tieni premuta una vocale e premi Spazio"
+            "Quick Accent active: hold a vowel and press Space"
         )));
     }
 
     // Menu a tendina: voce informativa (disabilitata) e "Esci".
     let menu = NSMenu::new(mtm);
     let info = NSMenuItem::new(mtm);
-    let info_title = NSString::from_str(&format!("{APP_NAME} è in esecuzione"));
+    let info_title = NSString::from_str(&format!("{APP_NAME} is running"));
     info.setTitle(&info_title);
     info.setEnabled(false);
     menu.addItem(&info);
@@ -171,7 +171,7 @@ fn setup_status_item(mtm: MainThreadMarker) {
     let quit = unsafe {
         NSMenuItem::initWithTitle_action_keyEquivalent(
             mtm.alloc(),
-            ns_string!("Esci"),
+            ns_string!("Quit"),
             // Nessun target esplicito: "terminate:" risale la responder chain
             // fino a NSApplication, che chiude l'app.
             Some(sel!(terminate:)),
@@ -187,9 +187,9 @@ fn setup_status_item(mtm: MainThreadMarker) {
 }
 
 fn main() {
-    println!("Mac {APP_NAME} (Modalità Universale Unicode) - Avviato!");
-    println!("Tieni premuta una vocale (A, E, I, O, U) e premi Spazio.");
-    println!("Premi Ctrl+C oppure usa il menu della barra per terminare.");
+    println!("Mac {APP_NAME} (Universal Unicode Mode) - Started!");
+    println!("Hold a vowel (A, E, I, O, U) and press Space.");
+    println!("Press Ctrl+C or use the menu bar item to quit.");
 
     start_keyboard_grab();
 
