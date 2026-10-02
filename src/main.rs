@@ -1,5 +1,11 @@
 use core_graphics::event::{CGEvent, CGEventTapLocation};
 use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
+use objc2::sel;
+use objc2::MainThreadMarker;
+use objc2_app_kit::{
+    NSApplication, NSApplicationActivationPolicy, NSMenu, NSMenuItem, NSStatusBar,
+};
+use objc2_foundation::{ns_string, NSString};
 use rdev::{grab, simulate, Event, EventType, Key};
 use std::sync::Mutex;
 use std::thread;
@@ -9,6 +15,9 @@ use std::time::{Duration, Instant};
 /// barra spaziatrice attivi la sostituzione (come il delay di PowerToys).
 /// Senza questa soglia, una normale battitura di "e " verrebbe alterata.
 const HOLD_THRESHOLD: Duration = Duration::from_millis(200);
+
+/// Nome mostrato all'utente (tooltip, menu, stdout): unica fonte di verità.
+const APP_NAME: &str = "Quick Accent";
 
 /// Piccola pausa prima dell'invio dei Backspace, per lasciare che il sistema
 /// smaltisca gli eventi di tastiera ancora in coda.
@@ -26,18 +35,16 @@ static STATE: Mutex<State> = Mutex::new(State {
     suppressed: None,
 });
 
-fn is_vowel(key: Key) -> bool {
-    matches!(key, Key::KeyA | Key::KeyE | Key::KeyI | Key::KeyO | Key::KeyU)
-}
-
-fn accent_for(vowel: Key) -> &'static str {
-    match vowel {
-        Key::KeyA => "à",
-        Key::KeyE => "è", // Cambia in "é" se preferisci l'accento acuto
-        Key::KeyI => "ì",
-        Key::KeyO => "ò",
-        Key::KeyU => "ù",
-        _ => "",
+/// Mappa ogni vocale supportata al suo carattere accentato: unica fonte di
+/// verità (SSOT) per l'insieme delle vocali gestite.
+fn accent_for(key: Key) -> Option<&'static str> {
+    match key {
+        Key::KeyA => Some("à"),
+        Key::KeyE => Some("è"), // Cambia in "é" se preferisci l'accento acuto
+        Key::KeyI => Some("ì"),
+        Key::KeyO => Some("ò"),
+        Key::KeyU => Some("ù"),
+        _ => None,
     }
 }
 
@@ -54,13 +61,11 @@ fn inject_unicode(text: &str) {
         // livello HID verrebbero ri-intercettati dal nostro stesso grab (rdev usa
         // un tap HID), e il keycode 0 verrebbe interpretato come 'a', sporcano
         // lo stato interno.
-        if let Ok(event_down) = CGEvent::new_keyboard_event(source.clone(), 0, true) {
-            event_down.set_string(text);
-            event_down.post(CGEventTapLocation::Session);
-        }
-        if let Ok(event_up) = CGEvent::new_keyboard_event(source, 0, false) {
-            event_up.set_string(text);
-            event_up.post(CGEventTapLocation::Session);
+        for key_down in [true, false] {
+            if let Ok(event) = CGEvent::new_keyboard_event(source.clone(), 0, key_down) {
+                event.set_string(text);
+                event.post(CGEventTapLocation::Session);
+            }
         }
     }
 }
@@ -86,11 +91,9 @@ fn callback(event: Event) -> Option<Event> {
                     for _ in 0..count {
                         send_backspace();
                     }
-
-                    let char = accent_for(vowel);
-                    inject_unicode(char);
-
-                    print!("Carattere sostituito: {}", char);
+                    if let Some(accent) = accent_for(vowel) {
+                        inject_unicode(accent);
+                    }
                 });
                 // Mangiamo lo spazio: non deve comparire a schermo.
                 return None;
@@ -100,7 +103,7 @@ fn callback(event: Event) -> Option<Event> {
         // Pressione di una vocale: tracciamo quale è premuta, da quando, e
         // quanti caratteri base ha digitato (l'auto-repeat genera pressioni
         // ripetute, una per carattere).
-        EventType::KeyPress(key) if is_vowel(key) => {
+        EventType::KeyPress(key) if accent_for(key).is_some() => {
             let mut state = STATE.lock().unwrap();
             if state.suppressed == Some(key) {
                 // Auto-repeat residuo dopo l'iniezione: lo mangiamo.
@@ -113,7 +116,7 @@ fn callback(event: Event) -> Option<Event> {
             Some(event)
         }
         // Rilascio di una vocale: resettiamo lo stato.
-        EventType::KeyRelease(key) if is_vowel(key) => {
+        EventType::KeyRelease(key) if accent_for(key).is_some() => {
             let mut state = STATE.lock().unwrap();
             if let Some((k, ..)) = &state.current {
                 if *k == key {
@@ -130,13 +133,66 @@ fn callback(event: Event) -> Option<Event> {
     }
 }
 
-fn main() {
-    println!("Mac Quick Accent (Modalità Universale Unicode) - Avviato!");
-    println!("Tieni premuta una vocale (A, E, I, O, U) e premi Spazio.");
-    println!("Premi Ctrl+C per terminare l'applicazione.");
+/// Avvia il listener della tastiera (bloccante) su un thread in background.
+fn start_keyboard_grab() {
+    thread::spawn(|| {
+        if let Err(error) = grab(callback) {
+            eprintln!("Errore critico durante l'intercettazione: {:?}", error);
+            eprintln!("Assicurati che il Terminale abbia i permessi di Accessibilità in Impostazioni di Sistema.");
+        }
+    });
+}
 
-    if let Err(error) = grab(callback) {
-        eprintln!("Errore critico durante l'intercettazione: {:?}", error);
-        eprintln!("Assicurati che il Terminale abbia i permessi di Accessibilità in Impostazioni di Sistema.");
+/// Crea l'icona nella barra dei menu di macOS con un menu di contesto.
+/// Deve essere chiamata sul thread principale.
+fn setup_status_item(mtm: MainThreadMarker) {
+    // Policy "Accessory": nessuna icona nel Dock, app solo nella barra dei menu.
+    let app = NSApplication::sharedApplication(mtm);
+    app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
+
+    // Creiamo lo status item con un'etichetta testuale (una "à" stilizzata).
+    let status_bar = NSStatusBar::systemStatusBar();
+    let item = status_bar.statusItemWithLength(-1.0); // -1.0 = NSVariableStatusItemLength
+    if let Some(button) = item.button(mtm) {
+        button.setTitle(ns_string!("à"));
+        button.setToolTip(Some(ns_string!(
+            "Quick Accent attivo: tieni premuta una vocale e premi Spazio"
+        )));
     }
+
+    // Menu a tendina: voce informativa (disabilitata) e "Esci".
+    let menu = NSMenu::new(mtm);
+    let info = NSMenuItem::new(mtm);
+    let info_title = NSString::from_str(&format!("{APP_NAME} è in esecuzione"));
+    info.setTitle(&info_title);
+    info.setEnabled(false);
+    menu.addItem(&info);
+
+    let quit = unsafe {
+        NSMenuItem::initWithTitle_action_keyEquivalent(
+            mtm.alloc(),
+            ns_string!("Esci"),
+            // Nessun target esplicito: "terminate:" risale la responder chain
+            // fino a NSApplication, che chiude l'app.
+            Some(sel!(terminate:)),
+            ns_string!("q"),
+        )
+    };
+    menu.addItem(&quit);
+    item.setMenu(Some(&menu));
+
+    // Avvia il run loop di AppKit (bloccante). Le variabili locali restano
+    // vive per tutta la durata del processo, mantenendo attivo lo status item.
+    app.run();
+}
+
+fn main() {
+    println!("Mac {APP_NAME} (Modalità Universale Unicode) - Avviato!");
+    println!("Tieni premuta una vocale (A, E, I, O, U) e premi Spazio.");
+    println!("Premi Ctrl+C oppure usa il menu della barra per terminare.");
+
+    start_keyboard_grab();
+
+    let mtm = MainThreadMarker::new().expect("main deve girare sul thread principale");
+    setup_status_item(mtm);
 }

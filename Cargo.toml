@@ -6,3 +6,14 @@ edition = "2024"
 [dependencies]
 rdev = { git = "https://github.com/Narsil/rdev", branch = "main", features = ["unstable_grab"] }
 core-graphics = "0.25"
+objc2 = "0.6"
+objc2-foundation = "0.3"
+objc2-app-kit = "0.3"
+
+# Binario menu-bar piccolo: massima ottimizzazione e dimensione ridotta.
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"
