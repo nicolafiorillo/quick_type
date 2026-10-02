@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 /// Per quanto tempo va tenuta premuta la vocale prima che la pressione della
 /// barra spaziatrice attivi la sostituzione (come il delay di PowerToys).
 /// Senza questa soglia, una normale battitura di "e " verrebbe alterata.
-const HOLD_THRESHOLD: Duration = Duration::from_millis(200);
+const HOLD_THRESHOLD: Duration = Duration::from_millis(100);
 
 /// Nome mostrato all'utente (tooltip, menu, stdout): unica fonte di verità.
 const APP_NAME: &str = "Quick Accent";

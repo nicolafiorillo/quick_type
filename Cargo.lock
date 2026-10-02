@@ -384,7 +384,7 @@ dependencies = [
 
 [[package]]
 name = "quick_type"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "core-graphics",
  "objc2",

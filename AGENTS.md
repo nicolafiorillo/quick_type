@@ -9,7 +9,9 @@ L'intera applicazione vive in [src/main.rs](src/main.rs) (~200 righe, single-fil
 - `cargo check` — verifica rapida (usare dopo ogni modifica)
 - `cargo build` / `cargo run` — build di debug
 - `cargo build --release` — build ottimizzata (profilo `[profile.release]` in [Cargo.toml](Cargo.toml): `lto`, `codegen-units = 1`, `strip`, `panic = "abort"`; non rimuoverlo, è pensato per un binario menu-bar piccolo)
-- **Runtime**: l'app richiede i permessi di Accessibilità macOS (Impostazioni di Sistema → Privacy e Sicurezza → Accessibilità) per il terminale/l'app che la esegue; senza, `rdev::grab` fallisce. Il test a runtime va fatto dall'utente.
+- `make build` / `make test` / `make install` — wrapper dei comandi cargo (`install` copia il binario in `~/.cargo/bin`)
+- `make autostart` — installa il binario e registra un LaunchAgent (`~/Library/LaunchAgents/com.quicktype.app.plist`) per l'avvio automatico al login; `make autostart-remove` per disattivarlo. Log su `/tmp/quick_type.{log,err}`. **Niente `KeepAlive`**: se l'app crasha o viene chiusa dal menu resta chiusa fino al prossimo login (decisione voluta, non riaggiungerlo).
+- **Runtime**: l'app richiede i permessi di Accessibilità macOS (Impostazioni di Sistema → Privacy e Sicurezza → Accessibilità) per il terminale/l'app che la esegue; senza, `rdev::grab` fallisce. Il test a runtime va fatto dall'utente. Con l'autostart attivo, il permesso va concesso al binario `quick_type` stesso.
 
 ## Architettura
 
