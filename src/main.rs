@@ -150,11 +150,11 @@ fn setup_status_item(mtm: MainThreadMarker) {
     let app = NSApplication::sharedApplication(mtm);
     app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
 
-    // Creiamo lo status item con un'etichetta testuale (una "à" stilizzata).
+    // Creiamo lo status item con un'etichetta testuale (una "è" stilizzata).
     let status_bar = NSStatusBar::systemStatusBar();
     let item = status_bar.statusItemWithLength(-1.0); // -1.0 = NSVariableStatusItemLength
     if let Some(button) = item.button(mtm) {
-        button.setTitle(ns_string!("à"));
+        button.setTitle(ns_string!("è"));
         button.setToolTip(Some(ns_string!(
             "Quick Accent active: hold a vowel and press Space"
         )));
