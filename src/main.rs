@@ -163,7 +163,8 @@ fn setup_status_item(mtm: MainThreadMarker) {
     // Menu a tendina: voce informativa (disabilitata) e "Esci".
     let menu = NSMenu::new(mtm);
     let info = NSMenuItem::new(mtm);
-    let info_title = NSString::from_str(&format!("{APP_NAME} is running"));
+    // env!("CARGO_PKG_VERSION") legge la versione da Cargo.toml a compile time (SSOT).
+    let info_title = NSString::from_str(&format!("{APP_NAME} v{}", env!("CARGO_PKG_VERSION")));
     info.setTitle(&info_title);
     info.setEnabled(false);
     menu.addItem(&info);
