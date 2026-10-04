@@ -1,4 +1,4 @@
-# Quick Accent (`quick_type`)
+# Quick Type
 
 A macOS menu bar utility: hold a vowel (A/E/I/O/U) and press Space to replace it with its accented counterpart (à/è/ì/ò/ù). Inspired by PowerToys Quick Accent.
 
@@ -17,6 +17,6 @@ make test     # run tests
 
 ## Usage
 
-Run `quick_type`: an "è" icon appears in the menu bar. From there you can check the version, toggle **Launch at login**, and quit with **Quit**.
+Run `quick_type`: an "è" icon appears in the menu bar. Open **Settings...** to configure.
 
 Architecture and conventions: [AGENTS.md](AGENTS.md).

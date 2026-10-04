@@ -1,5 +1,7 @@
+use std::cell::RefCell;
 use std::path::PathBuf;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use std::{env, fs, thread};
 
@@ -7,21 +9,35 @@ use objc2::rc::Retained;
 use objc2::runtime::NSObject;
 use objc2::{MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
-    NSApplication, NSApplicationActivationPolicy, NSControlStateValueOff, NSControlStateValueOn,
-    NSMenu, NSMenuItem, NSStatusBar,
+    NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSButton,
+    NSControlStateValueOff, NSControlStateValueOn, NSMenu, NSMenuItem, NSStatusBar, NSTextField,
+    NSView, NSWindow, NSWindowStyleMask,
 };
 use objc2_application_services::{
     AXIsProcessTrusted, AXIsProcessTrustedWithOptions, kAXTrustedCheckOptionPrompt,
 };
 use objc2_core_foundation::{CFBoolean, CFDictionary, CFString};
 use objc2_core_graphics::{CGEvent, CGEventSource, CGEventSourceStateID, CGEventTapLocation};
-use objc2_foundation::{NSString, NSTimer, ns_string};
-use rdev::{Event, EventType, Key, grab, simulate};
+use objc2_foundation::{NSPoint, NSRect, NSSize, NSString, NSTimer, NSUserDefaults, ns_string};
+use rdev::{Event, EventType, Key, grab, set_is_main_thread, simulate};
 
 /// Per quanto tempo va tenuta premuta la vocale prima che la pressione della
 /// barra spaziatrice attivi la sostituzione (come il delay di PowerToys).
 /// Senza questa soglia, una normale battitura di "e " verrebbe alterata.
-const HOLD_THRESHOLD: Duration = Duration::from_millis(100);
+const DEFAULT_HOLD_THRESHOLD_MS: u64 = 300;
+const HOLD_THRESHOLD_KEY: &str = "holdThresholdMs";
+
+static HOLD_THRESHOLD_MS: AtomicU64 = AtomicU64::new(DEFAULT_HOLD_THRESHOLD_MS);
+
+struct SettingsWindow {
+    window: Retained<NSWindow>,
+    launch_at_login: Retained<NSButton>,
+    hold_threshold: Retained<NSTextField>,
+}
+
+thread_local! {
+    static SETTINGS_WINDOW: RefCell<Option<SettingsWindow>> = const { RefCell::new(None) };
+}
 
 /// Piccola pausa prima dell'invio dei Backspace, per lasciare che il sistema
 /// smaltisca gli eventi di tastiera ancora in coda.
@@ -123,6 +139,27 @@ fn set_autostart(enabled: bool) {
     let _ = fs::write(plist, contents);
 }
 
+fn load_hold_threshold_ms() -> u64 {
+    let defaults = NSUserDefaults::standardUserDefaults();
+    let key = NSString::from_str(HOLD_THRESHOLD_KEY);
+    if defaults.objectForKey(&key).is_some() {
+        u64::try_from(defaults.integerForKey(&key)).unwrap_or(DEFAULT_HOLD_THRESHOLD_MS)
+    } else {
+        DEFAULT_HOLD_THRESHOLD_MS
+    }
+}
+
+fn save_hold_threshold_ms(value: u64) -> bool {
+    let Ok(value) = isize::try_from(value) else {
+        return false;
+    };
+    let defaults = NSUserDefaults::standardUserDefaults();
+    let key = NSString::from_str(HOLD_THRESHOLD_KEY);
+    defaults.setInteger_forKey(value, &key);
+    HOLD_THRESHOLD_MS.store(value as u64, Ordering::Relaxed);
+    true
+}
+
 /// Simula la pressione di Backspace (cancella un carattere base già digitato).
 fn send_backspace() {
     let _ = simulate(&EventType::KeyPress(Key::Backspace));
@@ -159,10 +196,10 @@ fn callback(event: Event) -> Option<Event> {
         // altrimenti la catturerebbe.
         EventType::KeyPress(Key::Space) => {
             let mut state = STATE.lock().unwrap();
-            let Some(held) = state
-                .current
-                .take_if(|held| held.since.elapsed() >= HOLD_THRESHOLD)
-            else {
+            let Some(held) = state.current.take_if(|held| {
+                held.since.elapsed()
+                    >= Duration::from_millis(HOLD_THRESHOLD_MS.load(Ordering::Relaxed))
+            }) else {
                 return Some(event);
             };
             state.suppressed = Some(held.key);
@@ -228,6 +265,8 @@ fn callback(event: Event) -> Option<Event> {
 /// il permesso non viene concesso.
 fn start_keyboard_grab() {
     thread::spawn(|| {
+        // Il tap gira in background: rdev deve tradurre i keycode sul main thread AppKit.
+        set_is_main_thread(false);
         let mut reported = false;
         while let Err(error) = grab(callback) {
             if !reported {
@@ -277,15 +316,41 @@ define_class!(
             timer.invalidate();
         }
 
-        #[unsafe(method(toggleAutostart:))]
-        fn toggle_autostart(&self, sender: &NSMenuItem) {
-            set_autostart(!autostart_enabled());
-            // La spunta riflette lo stato reale dopo l'operazione.
-            sender.setState(if autostart_enabled() {
-                NSControlStateValueOn
-            } else {
-                NSControlStateValueOff
+        #[unsafe(method(applySettings:))]
+        fn apply_settings(&self, _sender: &NSButton) {
+            SETTINGS_WINDOW.with(|stored| {
+                let stored = stored.borrow();
+                let Some(settings) = stored.as_ref() else {
+                    return;
+                };
+                let value = settings.hold_threshold.stringValue().to_string().parse::<u64>();
+                let Ok(value) = value else {
+                    settings.hold_threshold.setStringValue(&NSString::from_str(
+                        &HOLD_THRESHOLD_MS.load(Ordering::Relaxed).to_string(),
+                    ));
+                    return;
+                };
+                if !save_hold_threshold_ms(value) {
+                    return;
+                }
+                set_autostart(settings.launch_at_login.state() == NSControlStateValueOn);
+                settings.window.close();
             });
+        }
+
+        #[unsafe(method(cancelSettings:))]
+        fn cancel_settings(&self, _sender: &NSButton) {
+            SETTINGS_WINDOW.with(|stored| {
+                if let Some(settings) = stored.borrow().as_ref() {
+                    settings.window.close();
+                }
+            });
+        }
+
+        #[unsafe(method(showSettings:))]
+        fn show_settings(&self, _sender: &NSMenuItem) {
+            let mtm = MainThreadMarker::new().expect("settings deve girare sul thread principale");
+            show_settings_window(mtm, self);
         }
     }
 );
@@ -345,16 +410,12 @@ fn run_status_item(mtm: MainThreadMarker, trusted: bool) {
     let autostart = unsafe {
         NSMenuItem::initWithTitle_action_keyEquivalent(
             mtm.alloc(),
-            ns_string!("Launch at login"),
-            Some(sel!(toggleAutostart:)),
+            ns_string!("Settings..."),
+            Some(sel!(showSettings:)),
             ns_string!(""),
         )
     };
-    // Il target è weak: `handler` resta vivo perché app.run() non ritorna mai.
     unsafe { autostart.setTarget(Some(&handler)) };
-    if autostart_enabled() {
-        autostart.setState(NSControlStateValueOn);
-    }
     menu.addItem(&autostart);
 
     let quit = unsafe {
@@ -372,6 +433,114 @@ fn run_status_item(mtm: MainThreadMarker, trusted: bool) {
     app.run();
 }
 
+fn show_settings_window(mtm: MainThreadMarker, handler: &MenuHandler) {
+    NSApplication::sharedApplication(mtm).activate();
+    SETTINGS_WINDOW.with(|stored| {
+        if let Some(settings) = stored.borrow().as_ref() {
+            if !settings.window.isVisible() {
+                settings.launch_at_login.setState(if autostart_enabled() {
+                    NSControlStateValueOn
+                } else {
+                    NSControlStateValueOff
+                });
+                settings.hold_threshold.setStringValue(&NSString::from_str(
+                    &HOLD_THRESHOLD_MS.load(Ordering::Relaxed).to_string(),
+                ));
+            }
+            settings.window.makeKeyAndOrderFront(None);
+            return;
+        }
+        let settings = create_settings_window(mtm, handler);
+        settings.window.center();
+        settings.window.makeKeyAndOrderFront(None);
+        *stored.borrow_mut() = Some(settings);
+    });
+}
+
+fn create_settings_window(mtm: MainThreadMarker, handler: &MenuHandler) -> SettingsWindow {
+    let content_rect = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(430.0, 210.0));
+    let window = unsafe {
+        NSWindow::initWithContentRect_styleMask_backing_defer(
+            mtm.alloc(),
+            content_rect,
+            NSWindowStyleMask::Titled | NSWindowStyleMask::Closable,
+            NSBackingStoreType::Buffered,
+            false,
+        )
+    };
+    unsafe { window.setReleasedWhenClosed(false) };
+    window.setTitle(ns_string!("Settings"));
+
+    let content = NSView::initWithFrame(mtm.alloc(), content_rect);
+    let launch_at_login = unsafe {
+        NSButton::checkboxWithTitle_target_action(ns_string!("Launch at login"), None, None, mtm)
+    };
+    launch_at_login.setState(if autostart_enabled() {
+        NSControlStateValueOn
+    } else {
+        NSControlStateValueOff
+    });
+    launch_at_login.setFrame(NSRect::new(
+        NSPoint::new(20.0, 155.0),
+        NSSize::new(300.0, 24.0),
+    ));
+    content.addSubview(&launch_at_login);
+
+    let threshold_label = NSTextField::initWithFrame(
+        mtm.alloc(),
+        NSRect::new(NSPoint::new(20.0, 105.0), NSSize::new(255.0, 24.0)),
+    );
+    threshold_label.setStringValue(ns_string!("Hold threshold"));
+    threshold_label.setEditable(false);
+    threshold_label.setBordered(false);
+    threshold_label.setDrawsBackground(false);
+    content.addSubview(&threshold_label);
+
+    let threshold_field = NSTextField::initWithFrame(
+        mtm.alloc(),
+        NSRect::new(NSPoint::new(285.0, 105.0), NSSize::new(80.0, 24.0)),
+    );
+    threshold_field.setStringValue(&NSString::from_str(
+        &HOLD_THRESHOLD_MS.load(Ordering::Relaxed).to_string(),
+    ));
+    content.addSubview(&threshold_field);
+
+    let unit_label = NSTextField::initWithFrame(
+        mtm.alloc(),
+        NSRect::new(NSPoint::new(375.0, 105.0), NSSize::new(40.0, 24.0)),
+    );
+    unit_label.setStringValue(ns_string!("ms"));
+    unit_label.setEditable(false);
+    unit_label.setBordered(false);
+    unit_label.setDrawsBackground(false);
+    content.addSubview(&unit_label);
+
+    let cancel = NSButton::initWithFrame(
+        mtm.alloc(),
+        NSRect::new(NSPoint::new(250.0, 20.0), NSSize::new(80.0, 30.0)),
+    );
+    cancel.setTitle(ns_string!("Cancel"));
+    unsafe { cancel.setTarget(Some(handler)) };
+    unsafe { cancel.setAction(Some(sel!(cancelSettings:))) };
+    content.addSubview(&cancel);
+
+    let ok = NSButton::initWithFrame(
+        mtm.alloc(),
+        NSRect::new(NSPoint::new(340.0, 20.0), NSSize::new(80.0, 30.0)),
+    );
+    ok.setTitle(ns_string!("OK"));
+    unsafe { ok.setTarget(Some(handler)) };
+    unsafe { ok.setAction(Some(sel!(applySettings:))) };
+    content.addSubview(&ok);
+
+    window.setContentView(Some(&content));
+    SettingsWindow {
+        window,
+        launch_at_login,
+        hold_threshold: threshold_field,
+    }
+}
+
 fn main() {
     println!("Mac {APP_NAME} (Universal Unicode Mode) - Started!");
     println!("Hold a vowel (A, E, I, O, U) and press Space.");
@@ -380,6 +549,7 @@ fn main() {
     // Il prompt di sistema aggiunge il binario alla lista Accessibilità: senza
     // di esso, lanciato da launchd, l'app non comparirebbe tra quelle abilitabili.
     let trusted = accessibility_trusted(true);
+    HOLD_THRESHOLD_MS.store(load_hold_threshold_ms(), Ordering::Relaxed);
     start_keyboard_grab();
 
     let mtm = MainThreadMarker::new().expect("main deve girare sul thread principale");

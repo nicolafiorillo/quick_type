@@ -10,17 +10,18 @@ L'intera applicazione vive in [src/main.rs](src/main.rs) (single-file per scelta
 - `cargo build` / `cargo run` — build di debug
 - `cargo build --release` — build ottimizzata (profilo `[profile.release]` in [Cargo.toml](Cargo.toml): `lto`, `codegen-units = 1`, `strip`, `panic = "abort"`; non rimuoverlo, è pensato per un binario menu-bar piccolo)
 - `make build` / `make test` / `make install` — wrapper dei comandi cargo (`install` copia il binario in `~/.cargo/bin` e lo firma con `make sign`: firma ad-hoc con requisito `identifier "com.quicktype.app"`, così il permesso Accessibilità non si invalida a ogni reinstallazione; con `SIGN_IDENTITY="<certificato>"` si usa una firma vera). Il requisito basato solo sull'identifier va bene per un tool personale, ma qualunque binario ad-hoc con quell'identifier ne erediterebbe il permesso.
-- Avvio automatico al login: voce di menu **"Launch at login"** che (de)registra il LaunchAgent `~/Library/LaunchAgents/com.quicktype.app.plist` a runtime (label `com.quicktype.app`, SSOT: `LAUNCH_AGENT_LABEL`). Log su `/tmp/quick_type.{log,err}` (SSOT: `LOG_PATH_PREFIX`). **Niente `KeepAlive`**: se l'app crasha o viene chiusa dal menu resta chiusa fino al prossimo login (decisione voluta, non riaggiungerlo). Il plist punta a `current_exe()`: attivarlo dal binario installato, non da `target/debug`. **Niente `launchctl` (né `bootstrap` né `bootout`)**: con `RunAtLoad` il bootstrap lancerebbe subito una seconda istanza (bug già incontrato), il bootout fermerebbe quella corrente; il plist da solo basta, launchd lo carica al prossimo login.
+- Avvio automatico al login: checkbox **"Launch at login"** nella finestra **Settings...**, che (de)registra il LaunchAgent `~/Library/LaunchAgents/com.quicktype.app.plist` a runtime (label `com.quicktype.app`, SSOT: `LAUNCH_AGENT_LABEL`). Log su `/tmp/quick_type.{log,err}` (SSOT: `LOG_PATH_PREFIX`). **Niente `KeepAlive`**: se l'app crasha o viene chiusa dal menu resta chiusa fino al prossimo login (decisione voluta, non riaggiungerlo). Il plist punta a `current_exe()`: attivarlo dal binario installato, non da `target/debug`. **Niente `launchctl` (né `bootstrap` né `bootout`)**: con `RunAtLoad` il bootstrap lancerebbe subito una seconda istanza (bug già incontrato), il bootout fermerebbe quella corrente; il plist da solo basta, launchd lo carica al prossimo login.
+- Soglia di hold: campo in millisecondi in **Settings...**, default `300`; salvata in `NSUserDefaults` e caricata nello `static HOLD_THRESHOLD_MS` atomico per l'accesso dal callback `rdev`.
 - **Runtime**: l'app richiede il permesso di Accessibilità macOS (Impostazioni di Sistema → Privacy e Sicurezza → Accessibilità). Da terminale vale quello del terminale; lanciata da launchd (autostart) il permesso va concesso al binario `~/.cargo/bin/quick_type` stesso, altrimenti `rdev::grab` fallisce con `EventTapError` (l'icona compare comunque). Il test a runtime va fatto dall'utente.
 - **Permesso Accessibilità**: all'avvio `accessibility_trusted(true)` mostra il prompt di sistema (aggiunge il binario alla lista); `start_keyboard_grab` ritenta il grab ogni `PERMISSION_RETRY_INTERVAL` finché riesce (errore loggato una sola volta); se manca, il menu mostra la voce disabilitata "Accessibility permission required", che un `NSTimer` nasconde appena il permesso arriva. Non tornare a un grab singolo senza retry.
 
 ## Architettura
 
-- `rdev::grab` (feature `unstable_grab`, dipendenza **git** dal branch `main` di Narsil/rdev) intercetta la tastiera a livello HID su un thread dedicato; la `callback` decide per ogni evento se lasciarlo passare (`Some`) o mangiarlo (`None`).
+- `rdev::grab` (feature `unstable_grab`, dipendenza **git** dal branch `main` di Narsil/rdev) intercetta la tastiera a livello HID su un thread dedicato; chiamare `set_is_main_thread(false)` prima del grab, così la traduzione keycode via Text Input Services viene dispatchata al main thread. La `callback` decide per ogni evento se lasciarlo passare (`Some`) o mangiarlo (`None`).
 - Stato globale in `static STATE: Mutex<State>`: vocale tenuta premuta (`Held`: tasto, caratteri base digitati, istante, maiuscola) e vocale soppressa post-iniezione. La maiuscola si ricava da `event.name` (rdev lo calcola con Shift e CapsLock).
 - Al trigger (Spazio dopo hold, `Option::take_if` su `Held`): `thread::spawn` dorme `INJECT_DELAY` (15 ms), manda N Backspace via `rdev::simulate`, poi inietta il carattere Unicode (maiuscolo se `Held::upper`).
 - **Vincolo critico**: `inject_unicode` posta il `CGEvent` a `CGEventTapLocation::SessionEventTap`, **mai** `HIDEventTap`: gli eventi HID verrebbero ri-intercettati dal nostro stesso grab e il keycode 0 verrebbe letto come 'a', corrompendo lo stato. Non cambiare il tap location.
-- UI: `NSStatusItem` con policy `Accessory` (no Dock), menu con voce info disabilitata e "Esci" (`sel!(terminate:)` risale la responder chain). `app.run()` è bloccante sul thread principale.
+- UI: `NSStatusItem` con policy `Accessory` (no Dock), menu con voce info disabilitata, **Settings...** e "Esci" (`sel!(terminate:)` risale la responder chain). La finestra Settings applica Launch at login e la soglia hold con **OK**; **Cancel** e la chiusura della finestra scartano la bozza. `app.run()` è bloccante sul thread principale.
 
 ## Convenzioni di progetto
 
@@ -28,7 +29,7 @@ Il progetto segue rigorosamente **DRY**, **SSOT**, **no boilerplate**, **perform
 
 - `accent_for(key) -> Option<&'static str>` è l'**unica fonte di verità** per l'insieme delle vocali e la mappa vocale→accento. Aggiungere/togliere una vocale = una riga qui. Non reintrodurre funzioni separate tipo `is_vowel` né duplicare l'elenco nei `match`.
 - `APP_NAME` è l'unica fonte di verità per il nome mostrato all'utente (tooltip, menu, stdout).
-- Costanti documentate per ogni numero magico (`HOLD_THRESHOLD`, `INJECT_DELAY`); niente literal sparsi.
+- Costanti documentate per ogni numero magico (`DEFAULT_HOLD_THRESHOLD_MS`, `INJECT_DELAY`); niente literal sparsi.
 - **Stringhe utente in inglese britannico** (tooltip, menu, stdout/stderr); i commenti del codice restano in italiano e spiegano il *perché* (vincoli, invarianti), non il *cosa*.
 
 ## Approccio moderno
@@ -47,7 +48,7 @@ Queste alternative sono state analizzate e scartate; non riproporle:
 2. `thread::spawn` per trigger resta: i trigger sono rari e il thread vive ~15-30 ms; un thread pool sarebbe over-engineering.
 3. `statusItemWithLength(-1.0)` resta: è `NSVariableStatusItemLength`, già documentato dal commento inline.
 4. `let _ = simulate(...)` resta: non esiste un recovery sensato se la simulazione fallisce.
-5. `SMAppService` (API moderna macOS 13+) scartato: richiede un .app bundle, mentre quick_type è un binario raw. Si usa il LaunchAgent plist gestito a runtime dalla voce di menu. Non riproporlo finché il binario resta raw.
+5. `SMAppService` (API moderna macOS 13+) scartato: richiede un .app bundle, mentre quick_type è un binario raw. Si usa il LaunchAgent plist gestito a runtime dalla finestra Settings. Non riproporlo finché il binario resta raw.
 
 ## Pitfall noti
 
