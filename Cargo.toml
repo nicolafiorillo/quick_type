@@ -2,14 +2,16 @@
 name = "quick_type"
 version = "0.2.0"
 edition = "2024"
+rust-version = "1.88"
 
 [dependencies]
 rdev = { git = "https://github.com/Narsil/rdev", branch = "main", features = ["unstable_grab"] }
-core-graphics = "0.25"
 objc2 = "0.6"
-objc2-foundation = "0.3"
 objc2-app-kit = "0.3"
-libc = "0.2"
+objc2-application-services = { version = "0.3", default-features = false, features = ["std", "HIServices", "AXUIElement"] }
+objc2-core-foundation = { version = "0.3", default-features = false, features = ["std", "CFDictionary", "CFNumber", "CFString"] }
+objc2-core-graphics = { version = "0.3", default-features = false, features = ["std", "CGEvent", "CGEventSource", "CGEventTypes", "CGRemoteOperation"] }
+objc2-foundation = "0.3"
 
 # Binario menu-bar piccolo: massima ottimizzazione e dimensione ridotta.
 [profile.release]
